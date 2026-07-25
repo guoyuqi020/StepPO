@@ -94,5 +94,6 @@ class AgentFlowConfig(BaseConfig):
     # 兼容 verl 的旧字段（接受但忽略）
     default_agent_loop: Optional[str] = None
     agent_loop_config_path: Optional[str] = None
+    agent_loop_manager_class: Optional[str] = None
 
     custom_async_server: CustomAsyncServerConfig = field(default_factory=CustomAsyncServerConfig)

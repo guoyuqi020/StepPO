@@ -10,6 +10,12 @@ export OPENBLAS_NUM_THREADS=${OPENBLAS_NUM_THREADS:-1}
 export OMP_NUM_THREADS=${OMP_NUM_THREADS:-1}
 export MKL_NUM_THREADS=${MKL_NUM_THREADS:-1}
 
+if [[ -z "${PYTHON:-}" && -n "${CONDA_PREFIX:-}" && -x "$CONDA_PREFIX/bin/python" ]]; then
+    PYTHON="$CONDA_PREFIX/bin/python"
+else
+    PYTHON="${PYTHON:-python3}"
+fi
+
 PROJECT_DIR="$(pwd)"
 CONFIG_PATH="$PROJECT_DIR/recipe/hotpotqa/base_faiss_cpu.yaml"
 export HOTPOTQA_DATA_ROOT="${HOTPOTQA_DATA_ROOT:-$PROJECT_DIR/data/corpus/hotpotqa}"
@@ -61,7 +67,16 @@ VAL_FILES="$(build_val_files)"
 PROJECT_NAME='HotpotQA_ARFT'
 EXP_NAME='hotpotqa_step_level_0.99_adv_weave_wandb_8gpu'
 
-python3 -m arft.main_agent_ppo \
+VERL_OVERRIDES=(
+    reward.custom_reward_function.path=recipe/hotpotqa/reward_fn.py
+    reward.custom_reward_function.name=compute_score
+    reward.reward_model.enable=False
+    critic.fsdp.param_offload=True
+    critic.fsdp.optimizer_offload=True
+    critic.fsdp.model_dtype=bfloat16
+)
+
+"$PYTHON" -m arft.main_agent_ppo \
     algorithm.adv_estimator=gae \
     data.train_files="$TRAIN_PATH" \
     data.val_files="$VAL_FILES" \
@@ -77,7 +92,7 @@ python3 -m arft.main_agent_ppo \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
     actor_rollout_ref.actor.ppo_mini_batch_size=256 \
-    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=4 \
+    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=8 \
     actor_rollout_ref.actor.use_kl_loss=False \
     actor_rollout_ref.actor.policy_loss.loss_mode=gspo \
     actor_rollout_ref.actor.loss_agg_mode=seq-mean-token-mean \
@@ -100,14 +115,9 @@ python3 -m arft.main_agent_ppo \
     critic.model.use_remove_padding=True \
     critic.model.enable_gradient_checkpointing=True \
     critic.ppo_micro_batch_size_per_gpu=4 \
-    critic.model.fsdp_config.param_offload=True \
-    critic.model.fsdp_config.optimizer_offload=True \
-    critic.model.fsdp_config.model_dtype=bfloat16 \
     algorithm.use_kl_in_reward=False \
     algorithm.gamma=0.99 \
-    reward_model.enable=False \
-    custom_reward_function.path=recipe/hotpotqa/reward_fn.py \
-    custom_reward_function.name=compute_score \
+    "${VERL_OVERRIDES[@]}" \
     trainer.critic_warmup=0 \
     trainer.logger='["console","wandb"]' \
     trainer.project_name="$PROJECT_NAME" \

@@ -14,6 +14,7 @@
 import asyncio
 import logging
 import os
+import random
 from abc import ABC, abstractmethod
 from typing import Any, Optional
 from uuid import uuid4
@@ -29,26 +30,20 @@ from tensordict import TensorDict
 from transformers import AutoProcessor, AutoTokenizer
 
 from arft.reward_loop import ARFTRewardLoopWorker as RewardLoopWorker
-from verl.experimental.agent_loop.agent_loop import (
-    AsyncLLMServerManager,
-    DictConfigWrap,
-)
-from verl.experimental.agent_loop.prometheus_utils import update_prometheus_config
+from verl.experimental.agent_loop.agent_loop import DictConfigWrap
 from verl.experimental.agent_loop.utils import resolve_config_path
 from verl.protocol import DataProto
-from verl.single_controller.ray.base import RayResourcePool, RayWorkerGroup
 from verl.utils import hf_processor, hf_tokenizer
 from verl.utils.chat_template import initialize_system_prompt
 from verl.utils.dataset.rl_dataset import RLHFDataset, get_dataset_class
 from verl.utils.fs import copy_to_local
 from verl.utils.model import compute_position_id_with_mask
-from verl.utils.ray_utils import get_event_loop
+from verl.utils.ray_utils import auto_await, get_event_loop
 from verl.utils.rollout_trace import (
     RolloutTraceConfig,
     rollout_trace_attr,
 )
 from verl.utils.transferqueue_utils import tqbridge
-from verl.workers.rollout.replica import get_rollout_replica_class
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -133,7 +128,7 @@ class AgentFlowBase(ABC):
     def __init__(
         self,
         trainer_config: DictConfigWrap,
-        server_manager: AsyncLLMServerManager,
+        server_manager: Any,
         reward_loop_worker: RewardLoopWorker,
         tokenizer: AutoTokenizer,
         processor: AutoProcessor,
@@ -145,7 +140,7 @@ class AgentFlowBase(ABC):
 
         Args:
             trainer_config (DictConfigWrap): trainer config.
-            server_manager (AsyncLLMServerManager): OpenAI compatible LLM server manager.
+            server_manager: OpenAI-compatible LLM client or server manager.
             reward_loop_worker (RewardLoopWorker): Reward loop worker.
             tokenizer (AutoTokenizer): Tokenizer for tokenize messages.
             processor (AutoProcessor): Processor for process messages.
@@ -456,9 +451,14 @@ class AgentFlowBase(ABC):
                 batch=batch,
                 non_tensor_batch=non_tensor_batch,
             )
-            result = await self.reward_loop_worker.compute_score.remote(data)
+            reward_loop_worker = self.reward_loop_worker
+            if isinstance(reward_loop_worker, list):
+                if not reward_loop_worker:
+                    raise RuntimeError("No reward loop worker handles are available for AgentFlow reward scoring")
+                reward_loop_worker = random.choice(reward_loop_worker)
+            result = await reward_loop_worker.compute_score.remote(data)
             output.reward_score = result["reward_score"]
-            output.extra_fields["reward_extra_info"] = result["reward_extra_info"]
+            output.extra_fields["reward_extra_info"] = result.get("reward_extra_info", {})
 
 
 """Agent flow registry: key is agent_name, value is a dict of agent flow config
@@ -486,23 +486,20 @@ class AgentFlowWorkerBase:
     def __init__(
         self,
         config: DictConfig,
-        server_handles: list[ray.actor.ActorHandle],
-        reward_router_address: str = None,
+        *,
+        llm_client: Any,
+        teacher_client: Any = None,
+        reward_loop_worker_handles: Optional[list[ray.actor.ActorHandle]] = None,
     ):
-        """Initialize agent flow manager.
-
-        Args:
-            config (DictConfig): YAML config.
-            server_handles (List[ray.actor.ActorHandle]): OpenAI compatible LLM server actor handles.
-        """
+        """Initialize an agent flow worker."""
         self.config = config
+        self.teacher_client = teacher_client
 
-        # for recipe to change
-        if not hasattr(self, "server_manager"):
-            self.server_manager = AsyncLLMServerManager(config, server_handles)
+        if llm_client is None:
+            raise RuntimeError("AgentFlowWorker requires llm_client on the verl 0.8-only branch")
+        self.server_manager = llm_client
 
         self.dataset_cls = get_dataset_class(config.data)
-        self.reward_router_address = reward_router_address
 
         model_path = config.actor_rollout_ref.model.path
         self.model_name = "/".join(model_path.split("/")[-2:])
@@ -521,12 +518,17 @@ class AgentFlowWorkerBase:
                 self.processor.chat_template = self.config.actor_rollout_ref.model.custom_chat_template
             self.tokenizer.chat_template = self.config.actor_rollout_ref.model.custom_chat_template
 
-        self.reward_loop_worker = RewardLoopWorker.options(
-            scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
-                node_id=ray.get_runtime_context().get_node_id(),
-                soft=False,
-            ),
-        ).remote(self.config, self.reward_router_address)
+        if reward_loop_worker_handles is not None:
+            self.reward_loop_worker = reward_loop_worker_handles
+        else:
+            if RewardLoopWorker is None:
+                raise RuntimeError("ARFTRewardLoopWorker is unavailable; pass reward_loop_worker_handles instead")
+            self.reward_loop_worker = RewardLoopWorker.options(
+                scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
+                    node_id=ray.get_runtime_context().get_node_id(),
+                    soft=False,
+                ),
+            ).remote(self.config)
 
         trace_config = self.config.actor_rollout_ref.rollout.get("trace", {})
         RolloutTraceConfig.init(
@@ -638,11 +640,16 @@ class AgentFlowWorkerBase:
             )
 
             agent_flow_config = _agent_flow_registry[agent_name]
+            reward_loop_worker = self.reward_loop_worker
+            if isinstance(reward_loop_worker, (list, tuple)):
+                if not reward_loop_worker:
+                    raise RuntimeError("No reward loop worker handles are available for AgentFlow reward scoring")
+                reward_loop_worker = random.choice(reward_loop_worker)
             agent_flow = hydra.utils.instantiate(
                 config=agent_flow_config,
                 trainer_config=DictConfigWrap(config=self.config),
                 server_manager=self.server_manager,
-                reward_loop_worker=self.reward_loop_worker,
+                reward_loop_worker=reward_loop_worker,
                 tokenizer=self.tokenizer,
                 processor=self.processor,
                 dataset_cls=self.dataset_cls,
@@ -799,20 +806,19 @@ class AgentFlowWorker(AgentFlowWorkerBase):
     def __init__(
         self,
         config: DictConfig,
-        server_handles: list[ray.actor.ActorHandle],
-        reward_router_address: str = None,
+        *,
+        llm_client: Any,
+        teacher_client: Any = None,
+        reward_loop_worker_handles: Optional[list[ray.actor.ActorHandle]] = None,
         worker_index: int = 0,
     ):
-        """Initialize agent flow manager.
-
-        Args:
-            config (DictConfig): YAML config.
-            server_handles (List[ray.actor.ActorHandle]): OpenAI compatible LLM server actor handles.
-            reward_router_address (str): reward router address.
-            worker_index (int): Worker rank (0..num_workers-1); passed to agent flows e.g. for per-GPU BGE.
-        """
         self.agent_flow_worker_index = int(worker_index)
-        super().__init__(config, server_handles, reward_router_address)
+        super().__init__(
+            config,
+            llm_client=llm_client,
+            teacher_client=teacher_client,
+            reward_loop_worker_handles=reward_loop_worker_handles,
+        )
 
 
 async def get_trajectory_info(step, index, validate):
@@ -838,134 +844,77 @@ async def get_trajectory_info(step, index, validate):
 
 
 class AgentFlowManager:
-    """Agent flow manager that manages a group of agent flow workers."""
+    """Agent flow manager that dispatches prompts to AgentFlow workers."""
 
     def __init__(
-        self, config: DictConfig, worker_group: RayWorkerGroup = None, rm_resource_pool: RayResourcePool = None
+        self,
+        config: DictConfig,
+        *,
+        llm_client: Any,
+        teacher_client: Any = None,
+        reward_loop_worker_handles: Optional[list[ray.actor.ActorHandle]] = None,
+        _defer_worker_init: bool = False,
     ):
-        """Initialize agent flow manager.
-
-        Args:
-            config (DictConfig): trainer config.
-            worker_group (RayWorkerGroup): ActorRolloutRef worker group for hybrid mode; None for standalone mode.
-            rm_resource_pool (RayResourcePool): Resource pool for reward model (Standalone mode).
-        """
+        if llm_client is None:
+            raise RuntimeError("AgentFlowManager requires llm_client on the verl 0.8-only branch")
         self.config = config
-        self.worker_group = worker_group
-        self.reward_model_manager = None
-        self.reward_router_address = None
-        if self.config.reward_model.enable:
-            from verl.experimental.reward_loop import RewardModelManager
-
-            self.reward_model_manager = RewardModelManager(config.reward_model, rm_resource_pool)
-            self.reward_router_address = self.reward_model_manager.get_router_address()
-
-        # for recipe to change
-        if not hasattr(self, "rollout_replica_class"):
-            self.rollout_replica_class = get_rollout_replica_class(self.config.actor_rollout_ref.rollout.name)
+        self.llm_client = llm_client
+        self.teacher_client = teacher_client
+        self.reward_loop_worker_handles = reward_loop_worker_handles
         if not hasattr(self, "agent_flow_workers_class"):
             self.agent_flow_workers_class = AgentFlowWorker
+        if not _defer_worker_init:
+            self._init_agent_flow_workers()
 
-        self._initialize_llm_servers()
-        self._init_agent_flow_workers()
-
-        # Initially we're in sleep mode.
-        if self.config.actor_rollout_ref.rollout.free_cache_engine:
-            self.sleep()
-
-    def _initialize_llm_servers(self):
-        rollout_world_size = (
-            self.config.actor_rollout_ref.rollout.tensor_model_parallel_size
-            * self.config.actor_rollout_ref.rollout.data_parallel_size
-            * self.config.actor_rollout_ref.rollout.pipeline_model_parallel_size
-        )
-        world_size = (
-            self.worker_group.world_size
-            if self.worker_group
-            else self.config.trainer.n_gpus_per_node * self.config.trainer.nnodes
-        )
-        num_replicas = world_size // rollout_world_size
-
-        rollout_config = self.config.actor_rollout_ref.rollout
-        model_config = self.config.actor_rollout_ref.model
-        self.rollout_replicas = [
-            self.rollout_replica_class(
-                replica_rank=replica_rank,
-                config=rollout_config,
-                model_config=model_config,
-                gpus_per_node=self.config.trainer.n_gpus_per_node,
-            )
-            for replica_rank in range(num_replicas)
-        ]
-        if self.worker_group:
-            self._run_all([server.init_hybrid(self.worker_group) for server in self.rollout_replicas])
-        else:
-            self._run_all([server.init_standalone() for server in self.rollout_replicas])
-        self.server_handles = [server._server_handle for server in self.rollout_replicas]
-        self.server_addresses = [server._server_address for server in self.rollout_replicas]
-
-        print(f"AgentFlowManager: {self.server_addresses}")
-
-        # Update Prometheus configuration with server addresses
-        if rollout_config.prometheus.enable:
-            if rollout_config.disable_log_stats:
-                raise ValueError("PROMETHEUS needs disable_log_stats==False, but it is currently True.")
-            update_prometheus_config(rollout_config.prometheus, self.server_addresses)
+    @classmethod
+    @auto_await
+    async def create(cls, *args, **kwargs):
+        instance = cls(*args, **kwargs, _defer_worker_init=True)
+        instance._init_agent_flow_workers()
+        return instance
 
     def _init_agent_flow_workers(self):
         self.agent_flow_workers = []
         num_workers = self.config.actor_rollout_ref.rollout.agent.num_workers
-
         node_ids = [node["NodeID"] for node in ray.nodes() if node["Alive"] and node["Resources"].get("CPU", 0) > 0]
+        if not node_ids:
+            raise RuntimeError("No alive Ray nodes with CPU resources are available for AgentFlow workers")
+
         for i in range(num_workers):
-            # Round-robin scheduling over the all nodes
             node_id = node_ids[i % len(node_ids)]
-            self.agent_flow_workers.append(
-                self.agent_flow_workers_class.options(
-                    name=f"agent_flow_worker_{i}",
-                    scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
-                        node_id=node_id, soft=True
-                    ),
-                    # No GPU resource request, but preserve driver-visible GPUs (see RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES)
-                    # so tools like HotpotQA BGE can use cuda:N (or per-worker cuda:i via HOTPOTQA_EMBEDDING_PER_WORKER_GPU).
-                    runtime_env={"env_vars": {"RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1"}},
-                ).remote(self.config, self.server_handles, self.reward_router_address, worker_index=i)
+            worker_options = self.agent_flow_workers_class.options(
+                name=f"agent_flow_worker_{i}_{uuid4().hex[:8]}",
+                scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
+                    node_id=node_id, soft=True
+                ),
+                runtime_env={"env_vars": {"RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1"}},
             )
+            worker = worker_options.remote(
+                config=self.config,
+                llm_client=self.llm_client,
+                teacher_client=self.teacher_client,
+                reward_loop_worker_handles=self.reward_loop_worker_handles,
+                worker_index=i,
+            )
+            self.agent_flow_workers.append(worker)
 
     def generate_sequences(self, prompts: DataProto) -> DataProto:
-        """Split input batch and dispatch to agent loop workers.
-
-        Args:
-            prompts (DataProto): Input batch.
-
-        Returns:
-            DataProto: Output batch.
-        """
-
-        self.wake_up()
-        if self.reward_model_manager:
-            self.reward_model_manager.wake_up()
-
-        split_size = (len(prompts) - 1) // len(self.agent_flow_workers) + 1
-        chunks = prompts.split(split_size)
+        """Split input batch and dispatch to agent flow workers."""
+        if hasattr(prompts, "chunk"):
+            chunks = prompts.chunk(len(self.agent_flow_workers))
+        else:
+            split_size = (len(prompts) - 1) // len(self.agent_flow_workers) + 1
+            chunks = prompts.split(split_size)
         outputs = ray.get(
             [
                 worker.generate_sequences.remote(chunk)
-                for worker, chunk in zip(self.agent_flow_workers, chunks, strict=True)
+                for worker, chunk in zip(self.agent_flow_workers, chunks, strict=False)
             ]
         )
         output = DataProto.concat(outputs)
-        self.sleep()
-        if self.reward_model_manager:
-            self.reward_model_manager.sleep()
-
-        # calculate performance metrics
-        metrics = [output.meta_info.pop("metrics") for output in outputs]  # List[List[Dict[str, str]]]
-
-        # Extract num_steps from metrics for each request
+        metrics = [output.meta_info.pop("metrics") for output in outputs]
         num_steps = [metric["num_steps"] for chunk in metrics for metric in chunk]
         timing = self._performance_metrics(metrics, num_steps, output)
-
         output.meta_info = {"timing": timing, "num_steps": num_steps, **outputs[0].meta_info}
         return output
 
@@ -973,13 +922,9 @@ class AgentFlowManager:
         self, metrics: list[list[dict[str, str]]], num_steps: list[int], output: DataProto
     ) -> dict[str, float]:
         timing = {}
-
-        # Extract step-level timing from metrics
-        # Each metric dict corresponds to one trajectory, containing step-level timing data
         t_generate_sequences = np.array([metric["generate_sequences"] for chunk in metrics for metric in chunk])
         t_tool_calls = np.array([metric["tool_calls"] for chunk in metrics for metric in chunk])
 
-        # Step-level statistics (each number corresponds to one step)
         timing["agent_flow/step/generate_sequences/min"] = t_generate_sequences.min()
         timing["agent_flow/step/generate_sequences/max"] = t_generate_sequences.max()
         timing["agent_flow/step/generate_sequences/mean"] = t_generate_sequences.mean()
@@ -987,8 +932,6 @@ class AgentFlowManager:
         timing["agent_flow/step/tool_calls/max"] = t_tool_calls.max()
         timing["agent_flow/step/tool_calls/mean"] = t_tool_calls.mean()
 
-        # Trajectory-level statistics - aggregate step times by trajectory
-        # num_steps: [3, 2, 3] means 3 trajectories with 3, 2, 3 steps respectively
         trajectory_generate_times = []
         trajectory_tool_times = []
         trajectory_total_times = []
@@ -1015,13 +958,10 @@ class AgentFlowManager:
         timing["agent_flow/trajectory/total/max"] = trajectory_total_times.max()
         timing["agent_flow/trajectory/total/mean"] = trajectory_total_times.mean()
 
-        # Slowest trajectory (bounded by total trajectory time, not step time)
         slowest_traj_idx = np.argmax(trajectory_total_times)
-        # Find the step index range of the slowest trajectory in the flattened step array
         slowest_step_start_idx = sum(num_steps[:slowest_traj_idx])
         slowest_step_end_idx = slowest_step_start_idx + num_steps[slowest_traj_idx]
 
-        # Calculate total prompt and response length for the slowest trajectory
         prompt_length = output.batch["prompts"].shape[1]
         total_prompt_length = 0
         total_response_length = 0
@@ -1035,21 +975,3 @@ class AgentFlowManager:
         timing["agent_flow/slowest/total_response_length"] = total_response_length
 
         return timing
-
-    def wake_up(self):
-        """Wake up all rollout replica instances."""
-        self._run_all([replica.wake_up() for replica in self.rollout_replicas])
-
-    def sleep(self):
-        """Sleep all rollout replica instances."""
-        self._run_all([replica.sleep() for replica in self.rollout_replicas])
-
-    def clear_kv_cache(self):
-        """Clear all rollout kv cache, but don`t sleep."""
-        self._run_all([replica.clear_kv_cache() for replica in self.rollout_replicas])
-
-    def _run_all(self, tasks: list[asyncio.Task]):
-        async def run_all():
-            await asyncio.gather(*tasks)
-
-        asyncio.run(run_all())

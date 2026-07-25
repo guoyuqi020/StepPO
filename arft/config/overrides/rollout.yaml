@@ -19,6 +19,9 @@ agent:
   # custom agent flow config path
   agent_flow_config_path: null
 
+  # custom agent loop manager for verl 0.8 unified engine
+  agent_loop_manager_class: arft.agent_flow.agent_flow.AgentFlowManager
+
   # custom async server configs
   custom_async_server:
 

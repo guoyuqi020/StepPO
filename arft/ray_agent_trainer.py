@@ -35,7 +35,11 @@ from tqdm import tqdm
 
 from arft.metric_utils import compute_data_metrics
 from verl import DataProto
-from verl.experimental.dataset.sampler import AbstractCurriculumSampler
+try:
+    from verl.experimental.dataset.sampler import AbstractCurriculumSampler
+except ModuleNotFoundError:
+    class AbstractCurriculumSampler:
+        pass
 from verl.protocol import pad_dataproto_to_divisor
 from verl.single_controller.ray import RayClassWithInitArgs
 from verl.single_controller.ray.base import create_colocated_worker_cls
@@ -51,11 +55,11 @@ from verl.trainer.ppo.ray_trainer import (
     apply_kl_penalty,
     compute_response_mask,
 )
-from verl.trainer.ppo.reward import compute_reward_async
-from verl.trainer.ppo.utils import Role
+from verl.trainer.ppo.utils import Role, need_reward_model
 from verl.utils.checkpoint.checkpoint_manager import should_save_ckpt_esi
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.debug import marked_timer
+from verl.utils.import_utils import load_class_from_fqn
 from verl.utils.metric import reduce_metrics
 from verl.utils.rollout_skip import RolloutSkip
 
@@ -130,7 +134,8 @@ def _critic_vf_loss_response_mask(response_mask: torch.Tensor, adv_key: str) -> 
     if adv_key == "token_gae":
         return response_mask.clone()
     value_mask = torch.zeros_like(response_mask)
-    value_mask[:, 0] = 1
+    active_rows = response_mask.sum(dim=1) > 0
+    value_mask[active_rows, 0] = 1
     return value_mask
 
 
@@ -304,7 +309,10 @@ class RayAgentTrainer(RayPPOTrainer):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.reward_fn = None
+        self.val_reward_fn = None
         self.use_reward_loop = True
+        self.use_rm = need_reward_model(self.config)
         self._reward_scaler = None
 
         # `need_critic` in upstream verl only treats `gae` as needing a critic; `token_gae` must too
@@ -410,6 +418,42 @@ class RayAgentTrainer(RayPPOTrainer):
         # Log to each configured logger
         self.validation_generations_logger.log(self.config.trainer.logger, samples, self.global_steps)
 
+    def _compute_or_extract_reward(
+        self,
+        batch: DataProto,
+        reward_fn=None,
+        return_dict: bool = False,
+        sum_reward: bool = False,
+    ):
+        if "rm_scores" in batch.batch.keys():
+            reward_tensor = batch.batch["rm_scores"]
+            if sum_reward:
+                reward_tensor = reward_tensor.sum(dim=-1)
+            reward_extra_keys = batch.meta_info.get("reward_extra_keys", [])
+            reward_extra_info = {key: batch.non_tensor_batch[key] for key in reward_extra_keys} if reward_extra_keys else {}
+            if return_dict:
+                return {"reward_tensor": reward_tensor, "reward_extra_info": reward_extra_info}
+            if sum_reward:
+                return reward_tensor
+            return reward_tensor, reward_extra_info
+
+        if reward_fn is None:
+            raise ValueError("reward_fn must be provided when rm_scores is not available.")
+
+        if return_dict:
+            result = reward_fn(batch, return_dict=True)
+            reward_tensor = result["reward_tensor"]
+            if sum_reward:
+                reward_tensor = reward_tensor.sum(dim=-1)
+            return {"reward_tensor": reward_tensor, "reward_extra_info": result.get("reward_extra_info", {})}
+
+        result = reward_fn(batch, return_dict=True)
+        reward_tensor = result["reward_tensor"]
+        reward_extra_info = result.get("reward_extra_info", {})
+        if sum_reward:
+            reward_tensor = reward_tensor.sum(dim=-1)
+        return reward_tensor, reward_extra_info
+
     def _validate(self):
         data_source_lst = []
         reward_extra_infos_dict: dict[str, list] = defaultdict(list)
@@ -435,7 +479,7 @@ class RayAgentTrainer(RayPPOTrainer):
             )
 
             # we only do validation on rule-based rm
-            if self.config.reward_model.enable and test_batch[0].non_tensor_batch["reward_model"]["style"] == "model":
+            if self.config.reward.reward_model.enable and test_batch[0].non_tensor_batch["reward_model"]["style"] == "model":
                 return {}
 
             sample_uids.extend(test_batch.non_tensor_batch["uid"])
@@ -555,63 +599,46 @@ class RayAgentTrainer(RayPPOTrainer):
 
         return metric_dict
 
-    def init_workers(self):
-        """Initialize distributed training workers using Ray backend.
-
-        Creates:
-        1. Ray resource pools from configuration
-        2. Worker groups for each role (actor, critic, etc.)
-        """
+    def _init_workers_unified(self):
         self.resource_pool_manager.create_resource_pool()
-
         self.resource_pool_to_cls = {pool: {} for pool in self.resource_pool_manager.resource_pool_dict.values()}
 
-        # create actor and rollout
         actor_role = Role.ActorRolloutRef if Role.ActorRolloutRef in self.role_worker_mapping else Role.ActorRollout
         if self.hybrid_engine:
-            resource_pool = self.resource_pool_manager.get_resource_pool(actor_role)
+            actor_rollout_resource_pool = self.resource_pool_manager.get_resource_pool(actor_role)
             actor_rollout_cls = RayClassWithInitArgs(
                 cls=self.role_worker_mapping[actor_role],
                 config=self.config.actor_rollout_ref,
+                distillation_config=self.config.get("distillation"),
                 role=str(actor_role),
             )
-            self.resource_pool_to_cls[resource_pool][str(actor_role)] = actor_rollout_cls
+            self.resource_pool_to_cls[actor_rollout_resource_pool][str(actor_role)] = actor_rollout_cls
         else:
             raise NotImplementedError
 
-        # create critic
         if self.use_critic:
             resource_pool = self.resource_pool_manager.get_resource_pool(Role.Critic)
 
             from verl.workers.config import CriticConfig
+            from verl.workers.engine_workers import TrainingWorkerConfig
 
             critic_cfg: CriticConfig = omega_conf_to_dataclass(self.config.critic)
+            orig_critic_cfg = critic_cfg
+            engine_config = orig_critic_cfg.engine
+            engine_config.infer_max_token_len_per_gpu = critic_cfg.ppo_infer_max_token_len_per_gpu
+            engine_config.max_token_len_per_gpu = critic_cfg.ppo_max_token_len_per_gpu
 
-            if self.use_legacy_worker_impl == "disable":
-                # convert critic_cfg into TrainingWorkerConfig
-                from verl.workers.config import FSDPEngineConfig
-                from verl.workers.engine_workers import TrainingWorkerConfig
-
-                orig_critic_cfg = critic_cfg
-                if orig_critic_cfg.strategy == "fsdp":
-                    engine_config: FSDPEngineConfig = orig_critic_cfg.model.fsdp_config
-                    engine_config.infer_max_token_len_per_gpu = critic_cfg.ppo_infer_max_token_len_per_gpu
-                    engine_config.max_token_len_per_gpu = critic_cfg.ppo_max_token_len_per_gpu
-                else:
-                    raise NotImplementedError(f"Unknown strategy {orig_critic_cfg.strategy=}")
-
-                critic_cfg = TrainingWorkerConfig(
-                    model_type="value_model",
-                    model_config=orig_critic_cfg.model_config,
-                    engine_config=engine_config,
-                    optimizer_config=orig_critic_cfg.optim,
-                    checkpoint_config=orig_critic_cfg.checkpoint,
-                )
-
+            critic_cfg = TrainingWorkerConfig(
+                model_type="value_model",
+                model_config=orig_critic_cfg.model,
+                engine_config=engine_config,
+                optimizer_config=orig_critic_cfg.optim,
+                checkpoint_config=orig_critic_cfg.checkpoint,
+                extra_context=getattr(self, "_critic_extra_context", {}),
+            )
             critic_cls = RayClassWithInitArgs(cls=self.role_worker_mapping[Role.Critic], config=critic_cfg)
             self.resource_pool_to_cls[resource_pool][str(Role.Critic)] = critic_cls
 
-        # create reference policy if needed
         if self.use_reference_policy and Role.RefPolicy in self.role_worker_mapping:
             resource_pool = self.resource_pool_manager.get_resource_pool(Role.RefPolicy)
             ref_policy_cls = RayClassWithInitArgs(
@@ -621,18 +648,12 @@ class RayAgentTrainer(RayPPOTrainer):
             )
             self.resource_pool_to_cls[resource_pool][str(Role.RefPolicy)] = ref_policy_cls
 
-        # initialize WorkerGroup
-        # NOTE: if you want to use a different resource pool for each role, which can support different parallel size,
-        # you should not use `create_colocated_worker_cls`.
-        # Instead, directly pass different resource pool to different worker groups.
-        # See https://github.com/volcengine/verl/blob/master/examples/ray/tutorial.ipynb for more information.
         all_wg = {}
-        wg_kwargs = {}  # Setting up kwargs for RayWorkerGroup
+        wg_kwargs = {}
         if OmegaConf.select(self.config.trainer, "ray_wait_register_center_timeout") is not None:
             wg_kwargs["ray_wait_register_center_timeout"] = self.config.trainer.ray_wait_register_center_timeout
         if OmegaConf.select(self.config.global_profiler, "steps") is not None:
             wg_kwargs["profile_steps"] = OmegaConf.select(self.config.global_profiler, "steps")
-            # Only require nsight worker options when tool is nsys
             if OmegaConf.select(self.config.global_profiler, "tool") == "nsys":
                 assert (
                     OmegaConf.select(self.config.global_profiler.global_tool_config.nsys, "worker_nsight_options")
@@ -644,6 +665,8 @@ class RayAgentTrainer(RayPPOTrainer):
         wg_kwargs["device_name"] = self.device_name
 
         for resource_pool, class_dict in self.resource_pool_to_cls.items():
+            if not class_dict:
+                continue
             worker_dict_cls = create_colocated_worker_cls(class_dict=class_dict)
             wg_dict = self.ray_worker_group_cls(
                 resource_pool=resource_pool,
@@ -655,50 +678,87 @@ class RayAgentTrainer(RayPPOTrainer):
 
         if self.use_critic:
             self.critic_wg = all_wg[str(Role.Critic)]
-            if self.use_legacy_worker_impl == "disable":
-                self.critic_wg.reset()
-                # assign critic loss
-                from functools import partial
+            self.critic_wg.reset()
+            from functools import partial
 
-                from verl.workers.utils.losses import value_loss
+            from verl.workers.utils.losses import value_loss
 
-                value_loss_ = partial(value_loss, config=orig_critic_cfg)
-                self.critic_wg.set_loss_fn(value_loss_)
-            else:
-                self.critic_wg.init_model()
+            value_loss_ = partial(value_loss, config=orig_critic_cfg)
+            self.critic_wg.set_loss_fn(value_loss_)
 
         if self.use_reference_policy and not self.ref_in_actor:
             if str(Role.RefPolicy) in all_wg:
                 self.ref_policy_wg = all_wg[str(Role.RefPolicy)]
                 self.ref_policy_wg.init_model()
             else:
-                # Model engine: ActorRolloutRefWorker
                 assert str(Role.ActorRolloutRef) in all_wg, f"{all_wg.keys()=}"
                 self.ref_policy_wg = all_wg[str(Role.ActorRolloutRef)]
 
-        # we should create rollout at the end so that vllm can have a better estimation of kv cache memory
         self.actor_rollout_wg = all_wg[str(actor_role)]
         self.actor_rollout_wg.init_model()
 
         if self.ref_in_actor:
             self.ref_policy_wg = self.actor_rollout_wg
 
-        # create async rollout manager and request scheduler
-        # Note: mode is always "async" since sync mode is deprecated
+        from verl.experimental.reward_loop import RewardLoopManager
+
+        resource_pool = self.resource_pool_manager.get_resource_pool(Role.RewardModel) if self.use_rm else None
+        self.reward_loop_manager = RewardLoopManager(config=self.config, rm_resource_pool=resource_pool)
         self.async_rollout_mode = True
 
-        from arft.agent_flow import AgentFlowManager
+        if getattr(self, "use_teacher_policy", False):
+            from verl.experimental.teacher_loop import MultiTeacherModelManager
+            from verl.workers.config import DistillationConfig
 
-        if self.config.reward_model.enable:
-            rm_resource_pool = self.resource_pool_manager.get_resource_pool(Role.RewardModel)
+            teacher_resource_pool = self.resource_pool_manager.get_resource_pool(Role.TeacherModel)
+            self.teacher_model_manager = MultiTeacherModelManager(
+                config=self.config,
+                resource_pool=teacher_resource_pool,
+            )
+            self.distillation_config: DistillationConfig = omega_conf_to_dataclass(self.config.distillation)
         else:
-            rm_resource_pool = None
+            self.teacher_model_manager = None
+            self.distillation_config = None
 
-        self.async_rollout_manager = AgentFlowManager(
+        from verl.workers.rollout.llm_server import LLMServerManager
+
+        enable_agent_reward_loop = not self.use_rm or self.config.reward.reward_model.enable_resource_pool
+        self.llm_server_manager = LLMServerManager.create(
             config=self.config,
             worker_group=self.actor_rollout_wg,
-            rm_resource_pool=rm_resource_pool,
+            rollout_resource_pool=actor_rollout_resource_pool,
         )
+        reward_loop_worker_handles = self.reward_loop_manager.reward_loop_workers if enable_agent_reward_loop else None
+
+        manager_class_fqn = self.config.actor_rollout_ref.rollout.get("agent", {}).get("agent_loop_manager_class")
+        if manager_class_fqn:
+            AgentFlowManager = load_class_from_fqn(manager_class_fqn, "AgentFlowManager")
+        else:
+            from arft.agent_flow import AgentFlowManager
+
+        self.async_rollout_manager = AgentFlowManager.create(
+            config=self.config,
+            llm_client=self.llm_server_manager.get_client(),
+            teacher_client=self.teacher_model_manager.get_client() if getattr(self, "use_teacher_policy", False) else None,
+            reward_loop_worker_handles=reward_loop_worker_handles,
+        )
+
+        checkpoint_engine_config = omega_conf_to_dataclass(self.config.actor_rollout_ref.rollout.checkpoint_engine)
+        checkpoint_manager_class_fqn = self.config.actor_rollout_ref.rollout.get("checkpoint_manager_class")
+        if checkpoint_manager_class_fqn:
+            CheckpointEngineManager = load_class_from_fqn(checkpoint_manager_class_fqn, "CheckpointEngineManager")
+        else:
+            from verl.checkpoint_engine import CheckpointEngineManager
+        self.checkpoint_manager = CheckpointEngineManager(
+            config=checkpoint_engine_config,
+            trainer=self.actor_rollout_wg,
+            replicas=self.llm_server_manager.get_replicas(),
+        )
+        self.checkpoint_manager.sleep_replicas()
+
+    def init_workers(self):
+        """Initialize distributed training workers using the verl 0.8 unified engine."""
+        return self._init_workers_unified()
 
     def fit(self):
         """
@@ -722,12 +782,13 @@ class RayAgentTrainer(RayPPOTrainer):
 
         # load checkpoint before doing anything
         self._load_checkpoint()
+        if getattr(self, "checkpoint_manager", None) is not None:
+            self.checkpoint_manager.update_weights(self.global_steps)
 
         current_epoch = self.global_steps // len(self.train_dataloader)
 
         # perform validation before training
-        # currently, we only support validation using the reward_function.
-        if self.val_reward_fn is not None and self.config.trainer.get("val_before_train", True):
+        if self.config.trainer.get("val_before_train", True):
             val_metrics = self._validate()
             assert val_metrics, f"{val_metrics=}"
             pprint(f"Initial validation metrics: {val_metrics}")
@@ -789,6 +850,8 @@ class RayAgentTrainer(RayPPOTrainer):
                     # generate a batch
                     with marked_timer("gen", timing_raw, color="red"):
                         gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch_output)
+                        if getattr(self, "checkpoint_manager", None) is not None:
+                            self.checkpoint_manager.sleep_replicas()
 
                         timing_raw.update(gen_batch_output.meta_info["timing"])
                         gen_batch_output.meta_info.pop("timing", None)
@@ -811,7 +874,7 @@ class RayAgentTrainer(RayPPOTrainer):
                     if "response_mask" not in batch.batch.keys():
                         batch.batch["response_mask"] = compute_response_mask(batch)
 
-                    # batch needs to be padded to divisor of world size, we will pad with everything masked out
+                    # batch needs to be padded to divisor of worker world sizes before distributed dispatch.
                     batch = self._pad_dataproto_to_world_size(batch)
 
                     # Balance the number of valid tokens across DP ranks.
@@ -829,14 +892,11 @@ class RayAgentTrainer(RayPPOTrainer):
                             batch = batch.union(reward_tensor)
 
                         # Compute or extract reward for training
-                        if self.config.reward_model.launch_reward_fn_async:
-                            future_reward = compute_reward_async.remote(
-                                data=batch, config=self.config, tokenizer=self.tokenizer
-                            )
-                        else:
-                            reward_tensor, reward_extra_infos_dict = self._compute_or_extract_reward(
-                                batch, reward_fn=self.reward_fn, return_dict=False
-                            )
+                        if self.config.reward.get("launch_reward_fn_async", False) and "rm_scores" not in batch.batch.keys():
+                            raise NotImplementedError("launch_reward_fn_async requires AgentFlow rm_scores in the verl 0.8 ARFT path")
+                        reward_tensor, reward_extra_infos_dict = self._compute_or_extract_reward(
+                            batch, reward_fn=self.reward_fn, return_dict=False
+                        )
 
                     # Operating Mode Selection:
                     # - Bypass mode: Sets old_log_probs = rollout_log_probs (2 policies: π_rollout, π_θ)
@@ -894,8 +954,6 @@ class RayAgentTrainer(RayPPOTrainer):
                     with marked_timer("adv", timing_raw, color="brown"):
                         # we combine with rule-based rm
                         reward_extra_infos_dict: dict[str, list]
-                        if self.config.reward_model.launch_reward_fn_async:
-                            reward_tensor, reward_extra_infos_dict = ray.get(future_reward)
                         batch.batch["token_level_scores"] = reward_tensor
 
                         if reward_extra_infos_dict:
@@ -968,6 +1026,13 @@ class RayAgentTrainer(RayPPOTrainer):
                     # update critic
                     if self.use_critic:
                         with marked_timer("update_critic", timing_raw, color="pink"):
+                            is_pad = batch.non_tensor_batch.get("is_pad")
+                            if is_pad is not None and "values" in batch.batch.keys() and "returns" in batch.batch.keys():
+                                pad_mask = torch.from_numpy(is_pad).to(device=batch.batch["returns"].device, dtype=torch.bool)
+                                batch.batch["returns"][pad_mask] = batch.batch["values"][pad_mask].to(
+                                    dtype=batch.batch["returns"].dtype
+                                )
+
                             response_mask = batch.batch["response_mask"]
                             adv_key = _agent_adv_estimator_key(self.config.algorithm.adv_estimator)
                             batch.batch["response_mask"] = _critic_vf_loss_response_mask(
@@ -989,6 +1054,12 @@ class RayAgentTrainer(RayPPOTrainer):
                             actor_output = self._update_actor(batch)
                         actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
                         metrics.update(actor_output_metrics)
+                        if getattr(self, "checkpoint_manager", None) is not None:
+                            with marked_timer("update_weights", timing_raw, color="red"):
+                                self.checkpoint_manager.update_weights(self.global_steps)
+                    elif getattr(self, "checkpoint_manager", None) is not None:
+                        with marked_timer("update_weights", timing_raw, color="red"):
+                            self.checkpoint_manager.update_weights(self.global_steps)
 
                     # Log rollout generations if enabled
                     rollout_data_dir = self.config.trainer.get("rollout_data_dir", None)
@@ -996,10 +1067,8 @@ class RayAgentTrainer(RayPPOTrainer):
                         self._log_rollout_data(batch, reward_extra_infos_dict, timing_raw, rollout_data_dir)
 
                 # validate
-                if (
-                    self.val_reward_fn is not None
-                    and self.config.trainer.test_freq > 0
-                    and (is_last_step or self.global_steps % self.config.trainer.test_freq == 0)
+                if self.config.trainer.test_freq > 0 and (
+                    is_last_step or self.global_steps % self.config.trainer.test_freq == 0
                 ):
                     with marked_timer("testing", timing_raw, color="green"):
                         val_metrics: dict = self._validate()
@@ -1094,25 +1163,103 @@ class RayAgentTrainer(RayPPOTrainer):
 
     def _pad_dataproto_to_world_size(self, batch):
         world_sizes = []
-        if self.use_critic and self.critic_wg.world_size != 0:
-            world_sizes.append(self.critic_wg.world_size)
-        if self.use_reference_policy and self.ref_policy_wg.world_size != 0:
-            world_sizes.append(self.ref_policy_wg.world_size)
+
+        def config_positive_int(path: str) -> int | None:
+            value = OmegaConf.select(self.config, path)
+            if value is None:
+                return None
+            value = int(value)
+            return value if value > 0 else None
+
+        rollout_n = config_positive_int("actor_rollout_ref.rollout.n") or 1
+
+        def add_global_divisor(path: str):
+            value = config_positive_int(path)
+            if value is not None:
+                world_sizes.append(value * rollout_n)
+
+        def add_worker_divisor(worker_group, micro_batch_paths: tuple[str, ...] = ()):
+            world_size = getattr(worker_group, "world_size", 0)
+            if world_size == 0:
+                return
+            micro_batch_size = max(
+                [1, *(value for path in micro_batch_paths if (value := config_positive_int(path)) is not None)]
+            )
+            world_sizes.append(world_size * micro_batch_size)
+
+        if self.use_critic:
+            add_global_divisor("critic.ppo_mini_batch_size")
+            add_worker_divisor(
+                self.critic_wg,
+                (
+                    "critic.ppo_micro_batch_size_per_gpu",
+                    "critic.ppo_infer_micro_batch_size_per_gpu",
+                    "critic.forward_micro_batch_size_per_gpu",
+                ),
+            )
+        if self.use_reference_policy:
+            add_worker_divisor(
+                self.ref_policy_wg,
+                (
+                    "actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu",
+                    "actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu",
+                ),
+            )
         if self.hybrid_engine:
-            if self.actor_rollout_wg.world_size != 0:
-                world_sizes.append(self.actor_rollout_wg.world_size)
+            add_global_divisor("actor_rollout_ref.actor.ppo_mini_batch_size")
+            add_worker_divisor(
+                self.actor_rollout_wg,
+                (
+                    "actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu",
+                    "actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu",
+                ),
+            )
         else:
-            if self.actor_wg.world_size != 0:
-                world_sizes.append(self.actor_wg.world_size)
-            if self.rollout_wg.world_size != 0:
-                world_sizes.append(self.rollout_wg.world_size)
+            add_worker_divisor(
+                self.actor_wg,
+                (
+                    "actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu",
+                ),
+            )
+            add_worker_divisor(
+                self.rollout_wg,
+                (
+                    "actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu",
+                ),
+            )
         if not world_sizes:
             return batch
 
         world_size = reduce(math.lcm, world_sizes)
 
         original_batch_size = batch.batch["prompts"].shape[0]
+        existing_is_pad = batch.non_tensor_batch.get("is_pad")
+        if original_batch_size % world_size == 0:
+            if existing_is_pad is None:
+                batch.non_tensor_batch["is_pad"] = np.zeros(original_batch_size, dtype=bool)
+            else:
+                batch.non_tensor_batch["is_pad"] = np.asarray(existing_is_pad, dtype=bool)
+            return batch
+
         batch, pad_size = pad_dataproto_to_divisor(batch, world_size)
-        batch.non_tensor_batch["is_pad"] = np.array([False] * original_batch_size + [True] * pad_size)
+
+        if existing_is_pad is None:
+            is_pad = np.zeros(len(batch), dtype=bool)
+        else:
+            is_pad = np.asarray(existing_is_pad, dtype=bool)
+            if pad_size > 0:
+                is_pad = np.concatenate([is_pad, np.ones(pad_size, dtype=bool)])
+        if pad_size > 0:
+            is_pad[original_batch_size:] = True
+            for key in (
+                "rm_scores",
+                "token_level_scores",
+                "token_level_rewards",
+                "advantages",
+                "returns",
+            ):
+                if key in batch.batch.keys():
+                    batch.batch[key][original_batch_size:] = 0
+        batch.non_tensor_batch["is_pad"] = is_pad
 
         return batch

@@ -13,7 +13,7 @@ from arft.agent_flow.agent_flow import AgentFlowBase, AgentFlowOutput, AgentFlow
 from arft.reward_loop import ARFTRewardLoopWorker as RewardLoopWorker
 from recipe.webshop.prompts import WEBSHOP_TOOL_SCHEMAS
 from recipe.webshop.utils import WebShopEnvClient, build_invalid_tool_call_observation, build_webshop_messages
-from verl.experimental.agent_loop.agent_loop import AsyncLLMServerManager, DictConfigWrap
+from verl.experimental.agent_loop.agent_loop import DictConfigWrap
 from verl.experimental.agent_loop.tool_parser import FunctionCall, ToolParser
 from verl.utils.profiler import simple_timer
 
@@ -56,7 +56,7 @@ class WebShopAgentFlow(AgentFlowBase):
     def __init__(
         self,
         trainer_config: DictConfigWrap,
-        server_manager: AsyncLLMServerManager,
+        server_manager: Any,
         reward_loop_worker: RewardLoopWorker,
         tokenizer: AutoTokenizer,
         processor: AutoProcessor,

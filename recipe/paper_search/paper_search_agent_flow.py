@@ -18,7 +18,7 @@ from recipe.paper_search.tool_utils import (
     recover_tool_calls_from_text,
 )
 from recipe.paper_search.utils import Paper, PaperPool, PaperSearchClient, SelectorClient
-from verl.experimental.agent_loop.agent_loop import AsyncLLMServerManager, DictConfigWrap
+from verl.experimental.agent_loop.agent_loop import DictConfigWrap
 from verl.experimental.agent_loop.tool_parser import ToolParser
 from verl.utils.profiler import simple_timer
 
@@ -31,7 +31,7 @@ class PaperSearchAgentFlow(AgentFlowBase):
     def __init__(
         self,
         trainer_config: DictConfigWrap,
-        server_manager: AsyncLLMServerManager,
+        server_manager: Any,
         reward_loop_worker: RewardLoopWorker,
         tokenizer: AutoTokenizer,
         processor: AutoProcessor,
