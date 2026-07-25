@@ -1,15 +1,19 @@
 set -x
 
-# 4 GPUs: training + vLLM use 0–3; each of the 4 agent workers runs BGE on its own GPU (cuda:0..3).
-export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3}
+# 8 GPUs: training + vLLM use 0–7; each of the 8 agent workers runs BGE on its own GPU (cuda:0..7).
+export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}
 export HOTPOTQA_EMBEDDING_PER_WORKER_GPU=${HOTPOTQA_EMBEDDING_PER_WORKER_GPU:-1}
 export VLLM_USE_V1=1
+export WEAVE_PRINT_CALL_LINK=${WEAVE_PRINT_CALL_LINK:-false}
 export HYDRA_FULL_ERROR=1
-export MLFLOW_TRACKING_URI=${MLFLOW_TRACKING_URI:-http://172.17.0.1:5000}
+export OPENBLAS_NUM_THREADS=${OPENBLAS_NUM_THREADS:-1}
+export OMP_NUM_THREADS=${OMP_NUM_THREADS:-1}
+export MKL_NUM_THREADS=${MKL_NUM_THREADS:-1}
 
 PROJECT_DIR="$(pwd)"
 CONFIG_PATH="$PROJECT_DIR/recipe/hotpotqa/base_faiss_cpu.yaml"
 export HOTPOTQA_DATA_ROOT="${HOTPOTQA_DATA_ROOT:-$PROJECT_DIR/data/corpus/hotpotqa}"
+export HOTPOTQA_CORPUS_DATA_ROOT="${HOTPOTQA_CORPUS_DATA_ROOT:-$PROJECT_DIR/data/corpus/hotpotqa_corpus}"
 
 HOTPOTQA_MODEL_PATH=${HOTPOTQA_MODEL_PATH:-Qwen/Qwen3-4B-Instruct-2507}
 
@@ -55,13 +59,14 @@ build_val_files() {
 VAL_FILES="$(build_val_files)"
 
 PROJECT_NAME='HotpotQA_ARFT'
-EXP_NAME='hotpotqa_step_level_0.99_adv_mlflow_4gpu'
+EXP_NAME='hotpotqa_step_level_0.99_adv_weave_wandb_8gpu'
 
 python3 -m arft.main_agent_ppo \
     algorithm.adv_estimator=gae \
     data.train_files="$TRAIN_PATH" \
     data.val_files="$VAL_FILES" \
     data.train_batch_size=256 \
+    data.val_batch_size=256 \
     data.max_prompt_length="$HOTPOTQA_MAX_PROMPT_LEN" \
     data.max_response_length="$HOTPOTQA_MAX_RESPONSE_LEN" \
     data.filter_overlong_prompts=True \
@@ -78,14 +83,15 @@ python3 -m arft.main_agent_ppo \
     actor_rollout_ref.actor.loss_agg_mode=seq-mean-token-mean \
     actor_rollout_ref.actor.fsdp_config.param_offload=True \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
+    actor_rollout_ref.actor.fsdp_config.model_dtype=bfloat16 \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=8 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
     actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.7 \
     actor_rollout_ref.rollout.agent.agent_flow_config_path="$CONFIG_PATH" \
-    actor_rollout_ref.rollout.agent.num_workers=4 \
+    actor_rollout_ref.rollout.agent.num_workers=8 \
     actor_rollout_ref.rollout.agent.default_agent_flow=hotpotqa_agent \
-    actor_rollout_ref.rollout.trace.backend=mlflow \
+    actor_rollout_ref.rollout.trace.backend=weave \
     actor_rollout_ref.rollout.trace.token2text=True \
     actor_rollout_ref.rollout.trace.max_samples_per_step_per_worker=5 \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
@@ -96,18 +102,19 @@ python3 -m arft.main_agent_ppo \
     critic.ppo_micro_batch_size_per_gpu=4 \
     critic.model.fsdp_config.param_offload=True \
     critic.model.fsdp_config.optimizer_offload=True \
+    critic.model.fsdp_config.model_dtype=bfloat16 \
     algorithm.use_kl_in_reward=False \
     algorithm.gamma=0.99 \
     reward_model.enable=False \
     custom_reward_function.path=recipe/hotpotqa/reward_fn.py \
     custom_reward_function.name=compute_score \
     trainer.critic_warmup=0 \
-    trainer.logger='["console","swanlab","mlflow"]' \
+    trainer.logger='["console","wandb"]' \
     trainer.project_name="$PROJECT_NAME" \
     trainer.experiment_name="$EXP_NAME" \
-    trainer.n_gpus_per_node=4 \
+    trainer.n_gpus_per_node=8 \
     trainer.nnodes=1 \
-    trainer.val_before_train=True \
+    trainer.val_before_train=False \
     trainer.save_freq=100 \
     trainer.test_freq=10 \
     trainer.max_actor_ckpt_to_keep=3 \

@@ -69,6 +69,16 @@ def is_trl_available():
     return trl_spec is not None
 
 
+def get_trl_auto_model_for_causal_lm_with_value_head():
+    try:
+        from trl import AutoModelForCausalLMWithValueHead
+    except ImportError:
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message="You are importing from 'trl.experimental'.*")
+            from trl.experimental.ppo import AutoModelForCausalLMWithValueHead
+    return AutoModelForCausalLMWithValueHead
+
+
 def import_external_libs(external_libs=None):
     if external_libs is None:
         return

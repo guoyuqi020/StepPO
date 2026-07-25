@@ -23,7 +23,7 @@ import torch
 from transformers.modeling_flash_attention_utils import _flash_attention_forward
 from transformers.modeling_utils import PreTrainedModel
 
-from verl.utils.import_utils import is_trl_available
+from verl.utils.import_utils import get_trl_auto_model_for_causal_lm_with_value_head, is_trl_available
 from verl.utils.transformers_compat import is_transformers_version_in_range
 from verl.utils.ulysses import (
     gather_heads_scatter_seq,
@@ -298,7 +298,7 @@ def apply_monkey_patch(
     )
 
     if is_trl_available():
-        from trl import AutoModelForCausalLMWithValueHead  # type: ignore
+        AutoModelForCausalLMWithValueHead = get_trl_auto_model_for_causal_lm_with_value_head()
 
         def state_dict(self, *args, **kwargs):
             return torch.nn.Module.state_dict(self, *args, **kwargs)

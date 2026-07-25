@@ -42,7 +42,7 @@ from transformers import (
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
 from verl.models.registry import ModelRegistry
-from verl.utils.import_utils import is_trl_available
+from verl.utils.import_utils import get_trl_auto_model_for_causal_lm_with_value_head, is_trl_available
 
 
 class LambdaLayer(nn.Module):
@@ -592,7 +592,7 @@ def patch_valuehead_model(model) -> None:
     from types import MethodType
 
     from transformers import PreTrainedModel
-    from trl import AutoModelForCausalLMWithValueHead
+    AutoModelForCausalLMWithValueHead = get_trl_auto_model_for_causal_lm_with_value_head()
 
     def tie_weights(self: "AutoModelForCausalLMWithValueHead") -> None:
         if isinstance(self.pretrained_model, PreTrainedModel):
@@ -638,7 +638,7 @@ def load_valuehead_model(local_path, torch_dtype, model_config, trust_remote_cod
 
     assert is_trl_available()
 
-    from trl import AutoModelForCausalLMWithValueHead
+    AutoModelForCausalLMWithValueHead = get_trl_auto_model_for_causal_lm_with_value_head()
 
     if type(model_config) in AutoModelForVision2Seq._model_mapping.keys():
         module_class = AutoModelForVision2Seq

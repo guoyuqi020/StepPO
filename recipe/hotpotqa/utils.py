@@ -45,8 +45,8 @@ HOTPOTQA_CORPUS_JSONL = HOTPOTQA_CORPUS_DATA_ROOT / "hpqa_corpus.jsonl"
 # Default BGE checkpoint (local dir or Hugging Face hub id). Override via YAML `embedding_model_name` or
 # `HOTPOTQA_EMBEDDING_MODEL` for portability.
 DEFAULT_HOTPOTQA_EMBEDDING_MODEL = (
-    os.environ.get("HOTPOTQA_EMBEDDING_MODEL", "/data/wdy/models/bge-large-en-v1.5").strip()
-    or "/data/wdy/models/bge-large-en-v1.5"
+    os.environ.get("HOTPOTQA_EMBEDDING_MODEL", "BAAI/bge-large-en-v1.5").strip()
+    or "BAAI/bge-large-en-v1.5"
 )
 
 logger = logging.getLogger(__name__)
