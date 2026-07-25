@@ -114,7 +114,7 @@ MarkupSafe==3.0.3
 mathruler==0.1.0
 matplotlib-inline==0.2.2
 mdurl==0.1.2
-megatron-core @ git+https://github.com/NVIDIA/Megatron-LM.git@ea651a3b78b9b0c1dfd83975ff28853e38e5abaa
+# megatron-core @ git+https://github.com/NVIDIA/Megatron-LM.git@ea651a3b78b9b0c1dfd83975ff28853e38e5abaa
 mistral_common==1.11.6
 ml_dtypes==0.5.4
 modelscope==1.38.1
@@ -264,7 +264,7 @@ torchdata==0.11.0
 torchvision==0.23.0
 tqdm==4.69.0
 traitlets==5.15.1
-transformer_engine @ file:///wenyang/duoxing/TransformerEngine
+# transformer_engine @ file:///wenyang/duoxing/TransformerEngine
 transformers==4.56.1
 triton==3.4.0
 typer==0.27.0
@@ -273,7 +273,7 @@ typing_extensions==4.16.0
 urllib3==2.7.0
 uvicorn==0.51.0
 uvloop==0.22.1
--e git+ssh://git@github.com/verl-project/verl.git@7aed6b230776f963fa09509c10d9c3a767d1102c#egg=verl
+# -e git+ssh://git@github.com/verl-project/verl.git@7aed6b230776f963fa09509c10d9c3a767d1102c#egg=verl
 virtualenv==21.6.1
 vllm==0.11.0
 wandb==0.28.1
