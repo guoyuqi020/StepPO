@@ -115,6 +115,44 @@ Each recipe includes: agent flow definition, reward function, prompt templates, 
 
 ---
 
+## 📦 Data Preparation
+
+### HotpotQA
+
+```bash
+# 1. 下载数据并生成训练 parquet + 检索 corpus
+python recipe/hotpotqa/prepare_hotpotqa_arft.py \
+    --output_dir data/corpus/hotpotqa \
+    --corpus_output_path data/corpus/hotpotqa_corpus/hpqa_corpus.jsonl
+
+# 2. 构建 FAISS 检索索引
+python recipe/hotpotqa/process_hotpotqa.py \
+    --data_dir data/corpus/hotpotqa_corpus \
+    --corpus_path data/corpus/hotpotqa_corpus/hpqa_corpus.jsonl \
+    --embedding_model BAAI/bge-large-en-v1.5 \
+    --devices cuda:0 \
+    --batch_size 1024
+```
+
+生成文件：
+
+| 文件 | 说明 |
+|---|---|
+| `data/corpus/hotpotqa/train.parquet` | 训练集（90447 条） |
+| `data/corpus/hotpotqa/validation.parquet` | 验证集（7405 条） |
+| `data/corpus/hotpotqa_corpus/hpqa_corpus.jsonl` | 去重 wiki 段落（509308 条） |
+| `data/corpus/hotpotqa_corpus/index.bin` | FAISS 索引 |
+
+> **注意**：`datasets>=5.0` 要求数据集 ID 为 `namespace/name` 格式，`hotpot_qa` 无 namespace 会导致 `load_dataset` 卡住或报错。脚本已内置 parquet fallback（通过 `huggingface_hub` 直接下载），无需手动处理。
+
+### 验证数据
+
+```bash
+python recipe/hotpotqa/verify_dataset.py
+```
+
+---
+
 ## 📊 Experimental Results
 
 Preliminary experiments on HotpotQA demonstrate that step-level credit assignment consistently outperforms token-level PPO in multi-step agent settings.
