@@ -900,11 +900,8 @@ class AgentFlowManager:
 
     def generate_sequences(self, prompts: DataProto) -> DataProto:
         """Split input batch and dispatch to agent flow workers."""
-        if hasattr(prompts, "chunk"):
-            chunks = prompts.chunk(len(self.agent_flow_workers))
-        else:
-            split_size = (len(prompts) - 1) // len(self.agent_flow_workers) + 1
-            chunks = prompts.split(split_size)
+        split_size = (len(prompts) - 1) // len(self.agent_flow_workers) + 1
+        chunks = prompts.split(split_size)
         outputs = ray.get(
             [
                 worker.generate_sequences.remote(chunk)
