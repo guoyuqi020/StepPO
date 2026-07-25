@@ -33,4 +33,5 @@ data/raw/
 data/corpus/2wikimultihopqa_corpus/
 data/corpus/musique_corpus/
 data/corpus/hotpotqa/raw_*/
+/data/corpus/hotpotqa/*.parquet
 /wandb/
