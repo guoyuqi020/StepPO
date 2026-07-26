@@ -81,6 +81,19 @@ def _to_jsonable(value):
     return value
 
 
+def _move_role_perf_metrics(metrics: dict, role: str) -> dict:
+    role_perf_prefix = f"{role}/perf/"
+    system_perf_prefix = f"system/perf/{role}/"
+    for key in list(metrics.keys()):
+        if key.startswith(role_perf_prefix):
+            metrics[system_perf_prefix + key[len(role_perf_prefix) :]] = metrics.pop(key)
+
+    mfu_key = f"perf/mfu/{role}"
+    if mfu_key in metrics:
+        metrics[f"system/perf/{role}/mfu"] = metrics.pop(mfu_key)
+    return metrics
+
+
 def get_valid_data(data: DataProto) -> tuple[DataProto, torch.Tensor]:
     """Extract valid (non-padded) data from a DataProto object.
 
@@ -926,7 +939,7 @@ class RayAgentTrainer(RayPPOTrainer):
                             )
                             old_log_prob_metrics = {
                                 "actor/entropy": entropy_agg.detach().item(),
-                                "perf/mfu/actor_infer": old_log_prob_mfu,
+                                "system/perf/actor_infer/mfu": old_log_prob_mfu,
                             }
                             metrics.update(old_log_prob_metrics)
                             old_log_prob.batch.pop("entropys")
@@ -1044,7 +1057,9 @@ class RayAgentTrainer(RayPPOTrainer):
 
                             # restore response_mask
                             batch.batch["response_mask"] = response_mask
-                        critic_output_metrics = reduce_metrics(critic_output.meta_info["metrics"])
+                        critic_output_metrics = _move_role_perf_metrics(
+                            reduce_metrics(critic_output.meta_info["metrics"]), "critic"
+                        )
                         metrics.update(critic_output_metrics)
 
                     # implement critic warmup
@@ -1052,7 +1067,9 @@ class RayAgentTrainer(RayPPOTrainer):
                         # update actor
                         with marked_timer("update_actor", timing_raw, color="red"):
                             actor_output = self._update_actor(batch)
-                        actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
+                        actor_output_metrics = _move_role_perf_metrics(
+                            reduce_metrics(actor_output.meta_info["metrics"]), "actor"
+                        )
                         metrics.update(actor_output_metrics)
                         if getattr(self, "checkpoint_manager", None) is not None:
                             with marked_timer("update_weights", timing_raw, color="red"):

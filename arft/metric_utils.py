@@ -29,6 +29,27 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
     step_prompt_lengths = response_info["prompt_length"]
     step_response_lengths = response_info["response_length"]
 
+    response_mask = batch.batch["response_mask"].bool()
+    valid_steps = response_mask.any(dim=1)
+    if valid_steps.any():
+        returns = batch.batch["returns"]
+        first_token_indices = response_mask.long().argmax(dim=1)
+        row_indices = torch.arange(returns.shape[0], device=returns.device)
+        step_returns = returns[row_indices[valid_steps], first_token_indices[valid_steps]]
+        metrics["critic/returns/token_weighted_mean"] = metrics["critic/returns/mean"]
+        metrics["critic/returns/token_weighted_max"] = metrics["critic/returns/max"]
+        metrics["critic/returns/token_weighted_min"] = metrics["critic/returns/min"]
+        metrics["critic/returns/mean"] = step_returns.mean().detach().item()
+        metrics["critic/returns/max"] = step_returns.max().detach().item()
+        metrics["critic/returns/min"] = step_returns.min().detach().item()
+        if use_critic and "values" in batch.batch.keys():
+            values = batch.batch["values"]
+            step_values = values[row_indices[valid_steps], first_token_indices[valid_steps]]
+            return_diff_var = torch.var(step_returns - step_values)
+            return_var = torch.var(step_returns)
+            metrics["critic/vf_explained_var/token_weighted"] = metrics["critic/vf_explained_var"]
+            metrics["critic/vf_explained_var"] = (1.0 - return_diff_var / (return_var + 1e-5)).detach().item()
+
     # Trajectory Prompt Length (Sum of steps)
     traj_prompt_lengths = torch.zeros(num_trajectories, device=step_prompt_lengths.device)
     traj_prompt_lengths.scatter_add_(0, trajectory_indices_torch, step_prompt_lengths)
