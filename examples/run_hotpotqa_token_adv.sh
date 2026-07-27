@@ -1,8 +1,9 @@
 set -x
 
-# 4 GPUs: training + vLLM use 0–3; each of the 4 agent workers runs BGE on its own GPU (cuda:0..3).
+# 4 GPUs: training + vLLM use 0–3; each of the 4 agent workers runs BGE and FAISS on its own GPU (cuda:0..3).
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3}
 export HOTPOTQA_EMBEDDING_PER_WORKER_GPU=${HOTPOTQA_EMBEDDING_PER_WORKER_GPU:-1}
+export HOTPOTQA_FAISS_GPU=${HOTPOTQA_FAISS_GPU:-1}
 export VLLM_USE_V1=1
 export WEAVE_PRINT_CALL_LINK=${WEAVE_PRINT_CALL_LINK:-false}
 export HYDRA_FULL_ERROR=1
@@ -128,7 +129,7 @@ VERL_OVERRIDES=(
     trainer.experiment_name="$EXP_NAME" \
     trainer.n_gpus_per_node=4 \
     trainer.nnodes=1 \
-    trainer.val_before_train=True \
+    trainer.val_before_train=False \
     trainer.save_freq=100 \
     trainer.test_freq=10 \
     trainer.max_actor_ckpt_to_keep=20 \

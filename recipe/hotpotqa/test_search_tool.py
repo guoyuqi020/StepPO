@@ -11,11 +11,14 @@ Optional env vars (same as recipe/hotpotqa/utils.py):
   HOTPOTQA_CORPUS_DATA_ROOT defaults to <repo>/data/corpus/hotpotqa_corpus
   HOTPOTQA_EMBEDDING_DEVICE defaults to cpu; for BGE encoding e.g. cuda:0 (when not using HOTPOTQA_EMBEDDING_PER_WORKER_GPU)
   HOTPOTQA_EMBEDDING_PER_WORKER_GPU  if 1, agent worker i uses cuda:i (colocate with training GPUs)
+  HOTPOTQA_FAISS_GPU defaults to 1; set to 0/false/off to keep FAISS on CPU
+  HOTPOTQA_FAISS_GPU_DEVICE overrides the FAISS GPU id; otherwise it follows the embedding device
 """
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -57,10 +60,13 @@ def main() -> None:
     print(f"query                = {args.query!r}")
     print(f"embedding_model      = {args.embedding_model}")
     print(f"HOTPOTQA_EMBEDDING_DEVICE (env) = {default_hotpotqa_embedding_device()}")
+    print(f"HOTPOTQA_FAISS_GPU (env) = {os.environ.get('HOTPOTQA_FAISS_GPU', '1')}")
+    print(f"HOTPOTQA_FAISS_GPU_DEVICE (env) = {os.environ.get('HOTPOTQA_FAISS_GPU_DEVICE', '')}")
     print("---")
 
     tool = HotpotQASearchToolLegacy(embedding_model_name=args.embedding_model)
     print(f"HotpotQASearchToolLegacy.embedding_devices (after normalize) = {tool.embedding_devices}")
+    print(f"HotpotQASearchToolLegacy.faiss_gpu_device = {tool.faiss_gpu_device}")
     out = tool.execute({"query": args.query})
     print(f"success = {out.get('success')}")
     content = out.get("content", "")
