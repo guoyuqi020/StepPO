@@ -78,7 +78,7 @@ VERL_OVERRIDES=(
     reward.reward_model.enable=False
     critic.fsdp.param_offload=True
     critic.fsdp.optimizer_offload=True
-    critic.fsdp.model_dtype=bfloat16
+    critic.fsdp.model_dtype=float32
 )
 
 "$PYTHON" -m arft.main_agent_ppo \
@@ -94,19 +94,17 @@ VERL_OVERRIDES=(
     data.return_raw_chat=True \
     actor_rollout_ref.model.path="$HOTPOTQA_MODEL_PATH" \
     actor_rollout_ref.actor.optim.lr=1e-6 \
-    actor_rollout_ref.actor.optim.lr_warmup_steps_ratio=0.05 \
-    actor_rollout_ref.actor.optim.lr_scheduler_type=cosine \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
     actor_rollout_ref.actor.ppo_mini_batch_size=256 \
-    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=32 \
+    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=4 \
     actor_rollout_ref.actor.use_kl_loss=False \
     actor_rollout_ref.actor.policy_loss.loss_mode=gspo \
     actor_rollout_ref.actor.loss_agg_mode=seq-mean-token-mean \
     actor_rollout_ref.actor.fsdp_config.param_offload=True \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
-    actor_rollout_ref.actor.fsdp_config.model_dtype=bfloat16 \
-    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=32 \
+    actor_rollout_ref.actor.fsdp_config.model_dtype=float32 \
+    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=8 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
     actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.8 \
@@ -118,12 +116,10 @@ VERL_OVERRIDES=(
     actor_rollout_ref.rollout.trace.max_samples_per_step_per_worker=5 \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
     critic.model.path="$HOTPOTQA_MODEL_PATH" \
-    critic.optim.lr=2e-6 \
-    critic.optim.lr_warmup_steps_ratio=0.05 \
-    critic.optim.lr_scheduler_type=cosine \
+    critic.optim.lr=1e-5 \
     critic.model.use_remove_padding=True \
     critic.model.enable_gradient_checkpointing=True \
-    critic.ppo_micro_batch_size_per_gpu=32 \
+    critic.ppo_micro_batch_size_per_gpu=4 \
     algorithm.use_kl_in_reward=False \
     algorithm.gamma=0.99 \
     "${VERL_OVERRIDES[@]}" \
