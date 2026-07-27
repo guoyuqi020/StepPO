@@ -24,6 +24,7 @@ from hydra.core.plugins import Plugins
 from hydra.plugins.search_path_plugin import SearchPathPlugin
 from omegaconf import OmegaConf
 
+from arft.policy_losses import register_local_policy_losses
 from arft.ray_agent_trainer import RayAgentTrainer, need_critic_agent_ppo
 from arft.verl_compat import active_verl_trainer_config_path
 from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
@@ -78,6 +79,8 @@ def run_ppo_agent(config) -> None:
                 for distributed PPO training including Ray initialization settings,
                 model paths, and training hyperparameters.
     """
+    register_local_policy_losses()
+
     ray_init_kwargs = config.ray_kwargs.get("ray_init", {})
     runtime_env_kwargs = ray_init_kwargs.get("runtime_env", {})
     if config.transfer_queue.enable:
@@ -141,9 +144,9 @@ class TaskRunner:
 
     def add_actor_rollout_worker(self, config):
         """Add actor rollout worker using the verl 0.8 unified model engine."""
+        from arft.workers import ActorRolloutRefWorker
         from verl.single_controller.ray import RayWorkerGroup
         from verl.trainer.ppo.ray_trainer import Role
-        from verl.workers.engine_workers import ActorRolloutRefWorker
 
         actor_rollout_cls = ActorRolloutRefWorker
         ray_worker_group_cls = RayWorkerGroup
