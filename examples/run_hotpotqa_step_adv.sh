@@ -71,11 +71,11 @@ PROJECT_NAME='HotpotQA_ARFT'
 EXP_NAME='pure_hotpotqa_step_level_0.99_adv_weave_wandb_4gpu'
 
 VERL_OVERRIDES=(
-    reward.custom_reward_function.path=recipe/hotpotqa/reward_fn.py
-    reward.custom_reward_function.name=compute_score
-    reward.reward_model.enable=False
-    critic.fsdp.param_offload=True
-    critic.fsdp.optimizer_offload=True
+    custom_reward_function.path=recipe/hotpotqa/reward_fn.py
+    custom_reward_function.name=compute_score
+    reward_model.enable=False
+    critic.model.fsdp_config.param_offload=True
+    critic.model.fsdp_config.optimizer_offload=True
 )
 
 "$PYTHON" -m arft.main_agent_ppo \
@@ -107,9 +107,9 @@ VERL_OVERRIDES=(
     actor_rollout_ref.rollout.agent.agent_flow_config_path="$CONFIG_PATH" \
     actor_rollout_ref.rollout.agent.num_workers=4 \
     actor_rollout_ref.rollout.agent.default_agent_flow=hotpotqa_agent \
-    actor_rollout_ref.rollout.trace.backend=null \
-    actor_rollout_ref.rollout.trace.token2text=False \
-    actor_rollout_ref.rollout.trace.max_samples_per_step_per_worker=null \
+    actor_rollout_ref.rollout.trace.backend=weave \
+    actor_rollout_ref.rollout.trace.token2text=True \
+    actor_rollout_ref.rollout.trace.max_samples_per_step_per_worker=5 \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
     critic.model.path="$HOTPOTQA_MODEL_PATH" \
     critic.optim.lr=1e-5 \
