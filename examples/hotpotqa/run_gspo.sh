@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
-export EXP_NAME="${EXP_NAME:-hotpotqa_gspo}"
+export EXP_NAME="${EXP_NAME:-hotpotqa_gspo_wandb_4gpu}"
 export ARFT_GRPO_ROLLOUT_N="${ARFT_GSPO_ROLLOUT_N:-${ARFT_GRPO_ROLLOUT_N:-8}}"
 
 exec bash "$ROOT_DIR/examples/run_hotpotqa_grpo.sh" \
