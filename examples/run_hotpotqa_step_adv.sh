@@ -1,7 +1,7 @@
 set -x
 
 # 8 GPUs: training + vLLM use 0–7; each of the 8 agent workers runs BGE and optional FAISS on its own GPU (cuda:0..7).
-export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}
+export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3}
 export HOTPOTQA_EMBEDDING_PER_WORKER_GPU=${HOTPOTQA_EMBEDDING_PER_WORKER_GPU:-1}
 export HOTPOTQA_FAISS_GPU=${HOTPOTQA_FAISS_GPU:-1}
 export VLLM_USE_V1=1
@@ -68,7 +68,7 @@ build_val_files() {
 VAL_FILES="$(build_val_files)"
 
 PROJECT_NAME='HotpotQA_ARFT'
-EXP_NAME='hotpotqa_step_level_0.99_adv_weave_wandb_8gpu'
+EXP_NAME='pure_hotpotqa_step_level_0.99_adv_weave_wandb_4gpu'
 
 VERL_OVERRIDES=(
     reward.custom_reward_function.path=recipe/hotpotqa/reward_fn.py
@@ -94,18 +94,18 @@ VERL_OVERRIDES=(
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.model.enable_gradient_checkpointing=False \
     actor_rollout_ref.actor.ppo_mini_batch_size=256 \
-    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=32 \
+    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=4 \
     actor_rollout_ref.actor.use_kl_loss=False \
     actor_rollout_ref.actor.policy_loss.loss_mode=gspo \
     actor_rollout_ref.actor.loss_agg_mode=seq-mean-token-mean \
     actor_rollout_ref.actor.fsdp_config.param_offload=True \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
-    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=32 \
+    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=8 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
     actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.8 \
     actor_rollout_ref.rollout.agent.agent_flow_config_path="$CONFIG_PATH" \
-    actor_rollout_ref.rollout.agent.num_workers=8 \
+    actor_rollout_ref.rollout.agent.num_workers=4 \
     actor_rollout_ref.rollout.agent.default_agent_flow=hotpotqa_agent \
     actor_rollout_ref.rollout.trace.backend=null \
     actor_rollout_ref.rollout.trace.token2text=False \
@@ -115,7 +115,7 @@ VERL_OVERRIDES=(
     critic.optim.lr=1e-5 \
     critic.model.use_remove_padding=True \
     critic.model.enable_gradient_checkpointing=False \
-    critic.ppo_micro_batch_size_per_gpu=32 \
+    critic.ppo_micro_batch_size_per_gpu=4 \
     algorithm.use_kl_in_reward=False \
     algorithm.gamma=0.99 \
     "${VERL_OVERRIDES[@]}" \
@@ -123,11 +123,11 @@ VERL_OVERRIDES=(
     trainer.logger='["console","wandb"]' \
     trainer.project_name="$PROJECT_NAME" \
     trainer.experiment_name="$EXP_NAME" \
-    trainer.n_gpus_per_node=8 \
+    trainer.n_gpus_per_node=4 \
     trainer.nnodes=1 \
     trainer.val_before_train=False \
     trainer.save_freq=100 \
-    trainer.test_freq=100 \
-    trainer.max_actor_ckpt_to_keep=30 \
-    trainer.max_critic_ckpt_to_keep=30 \
+    trainer.test_freq=10 \
+    trainer.max_actor_ckpt_to_keep=3 \
+    trainer.max_critic_ckpt_to_keep=3 \
     trainer.total_epochs=5 "$@"
