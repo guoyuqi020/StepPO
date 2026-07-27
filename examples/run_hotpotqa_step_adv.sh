@@ -1,8 +1,9 @@
 set -x
 
-# 8 GPUs: training + vLLM use 0–7; each of the 8 agent workers runs BGE on its own GPU (cuda:0..7).
-export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}
+# 4 GPUs: training + vLLM use 0–3; each of the 4 agent workers runs BGE and FAISS on its own GPU (cuda:0..3).
+export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3}
 export HOTPOTQA_EMBEDDING_PER_WORKER_GPU=${HOTPOTQA_EMBEDDING_PER_WORKER_GPU:-1}
+export HOTPOTQA_FAISS_GPU=${HOTPOTQA_FAISS_GPU:-1}
 export VLLM_USE_V1=1
 export WEAVE_PRINT_CALL_LINK=${WEAVE_PRINT_CALL_LINK:-false}
 export HYDRA_FULL_ERROR=1
@@ -59,7 +60,7 @@ build_val_files() {
 VAL_FILES="$(build_val_files)"
 
 PROJECT_NAME='HotpotQA_ARFT'
-EXP_NAME='hotpotqa_step_level_0.99_adv_weave_wandb_8gpu'
+EXP_NAME='hotpotqa_step_level_0.99_adv_weave_wandb_4gpu'
 
 python3 -m arft.main_agent_ppo \
     algorithm.adv_estimator=gae \
@@ -89,7 +90,7 @@ python3 -m arft.main_agent_ppo \
     actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.7 \
     actor_rollout_ref.rollout.agent.agent_flow_config_path="$CONFIG_PATH" \
-    actor_rollout_ref.rollout.agent.num_workers=8 \
+    actor_rollout_ref.rollout.agent.num_workers=4 \
     actor_rollout_ref.rollout.agent.default_agent_flow=hotpotqa_agent \
     actor_rollout_ref.rollout.trace.backend=weave \
     actor_rollout_ref.rollout.trace.token2text=True \
@@ -112,7 +113,7 @@ python3 -m arft.main_agent_ppo \
     trainer.logger='["console","wandb"]' \
     trainer.project_name="$PROJECT_NAME" \
     trainer.experiment_name="$EXP_NAME" \
-    trainer.n_gpus_per_node=8 \
+    trainer.n_gpus_per_node=4 \
     trainer.nnodes=1 \
     trainer.val_before_train=False \
     trainer.save_freq=100 \

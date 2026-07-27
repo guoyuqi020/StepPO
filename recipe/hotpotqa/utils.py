@@ -93,6 +93,50 @@ def normalize_embedding_device(requested: str) -> str:
     return dev
 
 
+def _parse_cuda_device_index(device: Optional[str]) -> Optional[int]:
+    if device is None:
+        return None
+    dev = str(device).strip().lower()
+    if not dev or dev == "cpu":
+        return None
+    if dev.startswith("cuda"):
+        if ":" not in dev:
+            return 0
+        try:
+            return int(dev.split(":")[-1])
+        except ValueError:
+            return None
+    try:
+        return int(dev)
+    except ValueError:
+        return None
+
+
+def resolve_hotpotqa_faiss_gpu_device(embedding_devices: str) -> Optional[int]:
+    flag = os.environ.get("HOTPOTQA_FAISS_GPU", "1").strip().lower()
+    if flag in ("0", "false", "no", "off"):
+        return None
+    if not torch.cuda.is_available():
+        logger.warning("HOTPOTQA_FAISS_GPU is enabled but torch.cuda.is_available() is False; using CPU FAISS.")
+        return None
+    if not hasattr(faiss, "StandardGpuResources") or not hasattr(faiss, "index_cpu_to_gpu"):
+        logger.warning("HOTPOTQA_FAISS_GPU is enabled but this faiss build has no GPU support; using CPU FAISS.")
+        return None
+
+    raw = os.environ.get("HOTPOTQA_FAISS_GPU_DEVICE", "").strip() or embedding_devices
+    gpu_id = _parse_cuda_device_index(raw)
+    if gpu_id is None:
+        gpu_id = 0
+    if gpu_id < 0 or gpu_id >= torch.cuda.device_count():
+        logger.warning(
+            "FAISS GPU device %r invalid for torch.cuda.device_count()=%s; using CPU FAISS.",
+            raw,
+            torch.cuda.device_count(),
+        )
+        return None
+    return gpu_id
+
+
 def resolve_hotpotqa_embedding_devices(
     embedding_devices: Optional[str],
     agent_flow_worker_index: Optional[int],
@@ -175,6 +219,7 @@ class HotpotQASearchToolLegacy:
     _shared_lock = threading.RLock()
     _shared_key: Optional[str] = None
     _shared_index: Optional[faiss.Index] = None
+    _shared_gpu_resources: Optional[Any] = None
     _shared_corpus: Optional[list[str]] = None
     _shared_model: Optional[FlagAutoModel] = None
 
@@ -194,8 +239,10 @@ class HotpotQASearchToolLegacy:
         self.embedding_devices = normalize_embedding_device(raw)
         if self.embedding_devices != raw:
             logger.info("HotpotQASearchToolLegacy: effective embedding_devices=%r (from requested %r)", self.embedding_devices, raw)
+        self.faiss_gpu_device = resolve_hotpotqa_faiss_gpu_device(self.embedding_devices)
 
         self._index: Optional[faiss.Index] = None
+        self._gpu_resources: Optional[Any] = None
         self._corpus: list[str] = []
         self._model: Optional[FlagAutoModel] = None
         self._ensure_loaded()
@@ -208,7 +255,7 @@ class HotpotQASearchToolLegacy:
         self.close()
 
     def _ensure_loaded(self) -> None:
-        cache_key = f"{self.data_dir}|{self.embedding_devices}|{self.embedding_model_name}"
+        cache_key = f"{self.data_dir}|{self.embedding_devices}|{self.embedding_model_name}|faiss_gpu={self.faiss_gpu_device}"
         with self.__class__._shared_lock:
             if (
                 self.__class__._shared_key != cache_key
@@ -223,6 +270,11 @@ class HotpotQASearchToolLegacy:
 
                 logger.info("HotpotQASearchToolLegacy: loading FAISS index from %s", self.index_path)
                 index = faiss.read_index(str(self.index_path))
+                gpu_resources = None
+                if self.faiss_gpu_device is not None:
+                    logger.info("HotpotQASearchToolLegacy: moving FAISS index to cuda:%s", self.faiss_gpu_device)
+                    gpu_resources = faiss.StandardGpuResources()
+                    index = faiss.index_cpu_to_gpu(gpu_resources, int(self.faiss_gpu_device), index)
                 logger.info(
                     "HotpotQASearchToolLegacy: loading corpus jsonl from %s (may take several minutes)",
                     self.corpus_path,
@@ -250,6 +302,7 @@ class HotpotQASearchToolLegacy:
                 )
                 self.__class__._shared_key = cache_key
                 self.__class__._shared_index = index
+                self.__class__._shared_gpu_resources = gpu_resources
                 self.__class__._shared_corpus = corpus
                 self.__class__._shared_model = model
 
@@ -263,6 +316,7 @@ class HotpotQASearchToolLegacy:
                     )
 
             self._index = self.__class__._shared_index
+            self._gpu_resources = self.__class__._shared_gpu_resources
             self._corpus = self.__class__._shared_corpus or []
             self._model = self.__class__._shared_model
 
@@ -270,6 +324,7 @@ class HotpotQASearchToolLegacy:
         # Keep shared model/index alive for whole training process.
         # This matches legacy behavior where SearchTool is initialized once and reused.
         self._index = self.__class__._shared_index
+        self._gpu_resources = self.__class__._shared_gpu_resources
         self._corpus = self.__class__._shared_corpus or []
         self._model = self.__class__._shared_model
 
@@ -309,7 +364,7 @@ class HotpotQASearchToolLegacy:
         with self.__class__._shared_lock:
             assert self._model is not None
             out = self._model.encode_queries(queries)
-        # FAISS CPU Index::search expects host float32 ndarray; BGE on GPU may return torch.Tensor.
+        # FAISS search expects host float32 ndarray; BGE on GPU may return torch.Tensor.
         if torch.is_tensor(out):
             out = out.detach().float().cpu().numpy()
         arr = np.asarray(out, dtype=np.float32)

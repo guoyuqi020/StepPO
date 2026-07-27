@@ -1,8 +1,9 @@
 set -x
 
-# 4 GPUs: training + vLLM use 0–3; each of the 4 agent workers runs BGE on its own GPU (cuda:0..3).
+# 4 GPUs: training + vLLM use 0–3; each of the 4 agent workers runs BGE and FAISS on its own GPU (cuda:0..3).
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3}
 export HOTPOTQA_EMBEDDING_PER_WORKER_GPU=${HOTPOTQA_EMBEDDING_PER_WORKER_GPU:-1}
+export HOTPOTQA_FAISS_GPU=${HOTPOTQA_FAISS_GPU:-1}
 export VLLM_USE_V1=1
 export HYDRA_FULL_ERROR=1
 export MLFLOW_TRACKING_URI=${MLFLOW_TRACKING_URI:-http://172.17.0.1:5000}
