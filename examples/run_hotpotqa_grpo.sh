@@ -141,5 +141,5 @@ VERL_OVERRIDES=(
     trainer.val_before_train=True \
     trainer.save_freq=100 \
     trainer.test_freq=100 \
-    trainer.max_actor_ckpt_to_keep=30 \
+    trainer.max_actor_ckpt_to_keep=20 \
     trainer.total_epochs=5 "$@"
