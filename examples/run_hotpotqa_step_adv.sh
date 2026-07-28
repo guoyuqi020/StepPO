@@ -1,7 +1,7 @@
 set -x
 
 # 8 GPUs: training + vLLM use 0–7; each of the 8 agent workers runs BGE and optional FAISS on its own GPU (cuda:0..7).
-export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3}
+export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}
 export HOTPOTQA_EMBEDDING_PER_WORKER_GPU=${HOTPOTQA_EMBEDDING_PER_WORKER_GPU:-1}
 export HOTPOTQA_FAISS_GPU=${HOTPOTQA_FAISS_GPU:-1}
 export VLLM_USE_V1=1
@@ -10,7 +10,7 @@ export OPENBLAS_NUM_THREADS=${OPENBLAS_NUM_THREADS:-1}
 export OMP_NUM_THREADS=${OMP_NUM_THREADS:-1}
 export MKL_NUM_THREADS=${MKL_NUM_THREADS:-1}
 export VLLM_ATTENTION_BACKEND=FLASH_ATTN
-export SWANLAB_API_KEY=spvJszESzj8MSN6VHsQxa
+export SWANLAB_MODE=offline
 
 if [[ -z "${PYTHON:-}" && -n "${CONDA_PREFIX:-}" && -x "$CONDA_PREFIX/bin/python" ]]; then
     PYTHON="$CONDA_PREFIX/bin/python"
@@ -24,7 +24,7 @@ export HOTPOTQA_DATA_ROOT="${HOTPOTQA_DATA_ROOT:-$PROJECT_DIR/data/corpus/hotpot
 export HOTPOTQA_CORPUS_DATA_ROOT="${HOTPOTQA_CORPUS_DATA_ROOT:-$PROJECT_DIR/data/corpus/hotpotqa_corpus}"
 export MLFLOW_TRACKING_URI=${MLFLOW_TRACKING_URI:-sqlite:///$PROJECT_DIR/mlflow.db}
 
-HOTPOTQA_MODEL_PATH=${HOTPOTQA_MODEL_PATH:-Qwen/Qwen3-1.7B}
+HOTPOTQA_MODEL_PATH=${HOTPOTQA_MODEL_PATH:-Qwen/Qwen3-4B-Instruct-2507}
 
 # Length budget (vs. Agent-R1-legacy `run_ppo_hotpotqa.sh`; semantics differ):
 # - Legacy: multi-turn tokens concatenated into one trajectory → data.max_prompt_length=8192, full response=8192,
@@ -68,7 +68,7 @@ build_val_files() {
 VAL_FILES="$(build_val_files)"
 
 PROJECT_NAME='HotpotQA_ARFT'
-EXP_NAME='pure_hotpotqa_step_level_0.99_adv_4gpu'
+EXP_NAME='pure_hotpotqa_step_level_0.99_adv_8gpu'
 
 VERL_OVERRIDES=(
     custom_reward_function.path=recipe/hotpotqa/reward_fn.py
@@ -92,32 +92,32 @@ VERL_OVERRIDES=(
     actor_rollout_ref.model.path="$HOTPOTQA_MODEL_PATH" \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.model.use_remove_padding=True \
-    actor_rollout_ref.actor.fsdp_config.model_dtype=bfloat16 \
+    actor_rollout_ref.actor.fsdp_config.model_dtype=float32 \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
     actor_rollout_ref.actor.ppo_mini_batch_size=256 \
-    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=4 \
+    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=32 \
     actor_rollout_ref.actor.use_kl_loss=False \
     actor_rollout_ref.actor.policy_loss.loss_mode=gspo \
     actor_rollout_ref.actor.loss_agg_mode=seq-mean-token-mean \
     actor_rollout_ref.actor.fsdp_config.param_offload=True \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
-    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=8 \
+    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=32 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
     actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
     actor_rollout_ref.rollout.agent.agent_flow_config_path="$CONFIG_PATH" \
-    actor_rollout_ref.rollout.agent.num_workers=4 \
+    actor_rollout_ref.rollout.agent.num_workers=8 \
     actor_rollout_ref.rollout.agent.default_agent_flow=hotpotqa_agent \
     actor_rollout_ref.rollout.trace.backend=mlflow \
     actor_rollout_ref.rollout.trace.token2text=True \
-    actor_rollout_ref.rollout.trace.max_samples_per_step_per_worker=5 \
+    actor_rollout_ref.rollout.trace.max_samples_per_step_per_worker=1 \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
     critic.model.path="$HOTPOTQA_MODEL_PATH" \
     critic.optim.lr=1e-5 \
     critic.model.use_remove_padding=True \
-    critic.model.fsdp_config.model_dtype=bfloat16\
+    critic.model.fsdp_config.model_dtype=float32\
     critic.model.enable_gradient_checkpointing=True \
-    critic.ppo_micro_batch_size_per_gpu=4 \
+    critic.ppo_micro_batch_size_per_gpu=32 \
     algorithm.use_kl_in_reward=False \
     algorithm.gamma=0.99 \
     "${VERL_OVERRIDES[@]}" \
@@ -125,9 +125,9 @@ VERL_OVERRIDES=(
     trainer.logger='["console","mlflow", "swanlab"]' \
     trainer.project_name="$PROJECT_NAME" \
     trainer.experiment_name="$EXP_NAME" \
-    trainer.n_gpus_per_node=4 \
+    trainer.n_gpus_per_node=8 \
     trainer.nnodes=1 \
-    trainer.val_before_train=False \
+    trainer.val_before_train=True \
     trainer.save_freq=100 \
     trainer.test_freq=100 \
     trainer.max_actor_ckpt_to_keep=3 \
